@@ -311,6 +311,7 @@ getLocatedImportsRule =
     define $ \GetLocatedImports file -> do
         ModSummaryResult{msrModSummary = ms} <- use_ GetModSummaryWithoutTimestamps file
         targets <- useNoFile_ GetKnownTargets
+        let targetsMap = HM.mapWithKey const targets
         let imports = [(False, imp) | imp <- ms_textual_imps ms] ++ [(True, imp) | imp <- ms_srcimps ms]
         env_eq <- use_ GhcSession file
         let env = hscEnvWithImportPaths env_eq
@@ -321,14 +322,19 @@ getLocatedImportsRule =
                     then addRelativeImport file (moduleName $ ms_mod ms) dflags
                     else dflags
         opt <- getIdeOptions
-        let getTargetExists modName nfp
-                | isImplicitCradle = getFileExists nfp
-                | HM.member (TargetModule modName) targets
-                || HM.member (TargetFile nfp) targets
-                = getFileExists nfp
-                | otherwise = return False
+        let getTargetFor modName nfp
+                | Just (TargetFile nfp') <- HM.lookup (TargetFile nfp) targetsMap = do
+                    -- important to reuse the existing NormalizedFilePath in the HM
+                    -- in order to maximize sharing
+                    itExists <- getFileExists nfp'
+                    return $ if itExists then Just nfp' else Nothing
+                | isImplicitCradle || HM.member (TargetModule modName) targets = do
+                    itExists <- getFileExists nfp
+                    return $ if itExists then Just nfp else Nothing
+                | otherwise
+                = return Nothing
         (diags, imports') <- fmap unzip $ forM imports $ \(isSource, (mbPkgName, modName)) -> do
-            diagOrImp <- locateModule dflags import_dirs (optExtensions opt) getTargetExists modName mbPkgName isSource
+            diagOrImp <- locateModule dflags import_dirs (optExtensions opt) getTargetFor modName mbPkgName isSource
             case diagOrImp of
                 Left diags              -> pure (diags, Just (modName, Nothing))
                 Right (FileImport path) -> pure ([], Just (modName, Just path))
